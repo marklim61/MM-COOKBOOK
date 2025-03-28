@@ -1,0 +1,30 @@
+<!-- recipes/templates/recipes/list.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Cookbook</title>
+</head>
+<body>
+    <h1>My Recipes</h1>
+    
+    <!-- Loop through dishes -->
+    <div class="dish-list">
+        {% for dish in dishes %}
+          <div class="dish-card">
+            <!-- Show the dish image if it exists -->
+            {% if dish.image %}
+              <img src="{{ dish.image.url }}" alt="{{ dish.name }}" class="dish-image">
+            {% endif %}
+            <h2>{{ dish.name }}</h2>
+            <p>⏱️ Total time: {{ dish.total_time }} minutes</p>
+            <h3>Ingredients:</h3>
+            <ul>
+              {% for ingredient in dish.ingredients.all %}
+                <li>{{ ingredient.name }} ({{ ingredient.quantity }} {{ ingredient.unit }})</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endfor %}
+      </div>
+</body>
+</html>
