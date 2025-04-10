@@ -1,77 +1,151 @@
-from django.contrib import admin                        # Import the admin module
-from .models import Dish, Ingredient                    # Import the Dish and Ingredient models to the admin panel
-from django.utils.html import format_html               # This is for image previews
-from .forms import DishForm                             # Import the DishForm
-from django.contrib import messages                     # Import the messages module
+"""
+This file customizes the Django admin interface for the recipe app, enhancing how models are displayed and managed.
+"""
+from django.contrib import admin
+from django.contrib import messages
+from django.utils.html import format_html
+from .models import Dish, Ingredient, Grocery, CookingStep, DishIngredient, Unit
+from .forms import DishForm
+import os
 
-# Register your models here.
-@admin.register(Dish)                                                                                   # More modern registration decorator
+class CookingStepInline(admin.TabularInline):
+    model = CookingStep
+    extra = 1
+    fields = ('step_number', 'instruction', 'image')
+    ordering = ('step_number',)
+
+class DishIngredientInline(admin.TabularInline):
+    model = DishIngredient
+    extra = 1
+    autocomplete_fields = ['ingredient', 'unit']
+
+"""
+This class customizes the Django admin interface for the Dish model.
+methods
+1. total_time
+2. ingredient_list
+3. image_preview
+4. save_model
+5. delete_queryset
+6. save_formset
+"""
+@admin.register(Dish)
 class DishAdmin(admin.ModelAdmin):
-    form = DishForm                                                                                     # Use our custom form
-    list_display = ('name', 'prep_time', 'cook_time', 'total_time', 'ingredient_list', 'image_preview') # Display these fields
-    list_filter = ('prep_time', 'cook_time')                                                            # Adds filters sidebar
-    search_fields = ('name',)                                                                           # Adds search box
-    filter_horizontal = ('ingredients',)                                                                # Better many-to-many widget
+    form = DishForm
+    list_display = ('name', 'prep_time', 'cook_time', 'total_time', 'ingredient_list', 'image_preview')
+    list_filter = ('prep_time', 'cook_time')
+    search_fields = ('name',)
+    filter_horizontal = ()
+    inlines = [DishIngredientInline, CookingStepInline]
     
     # Edit view customization
-    fieldsets = (                                                                                       # Group fields
+    fieldsets = (
         ('Basic Info', {
-            'fields': ('name', 'image', 'image_preview')
+            'fields': ('name', 'description','image', 'image_preview')
         }),
         ('Timing', {
             'fields': ('prep_time', 'cook_time')
         }),
-        ('Ingredients', {
-            'fields': ('ingredients',)
-        }),
     )
-    readonly_fields = ('image_preview',)                                                                # Make preview read-only
+    readonly_fields = ('image_preview',)
     
-    # Custom methods for list view
-    def total_time(self, obj):                                                                          # Calculate the total time                             
-        return f"{obj.prep_time + obj.cook_time} mins"                                                  # Return the total time
-    total_time.short_description = 'Total Time'                                                         # Rename the column     
+    def total_time(self, obj):                        
+        return f"{obj.prep_time + obj.cook_time} mins"
+    total_time.short_description = 'Total Time'
     
-    def ingredient_list(self, obj):                                                                     # Show first 3 ingredients     
-        return ", ".join([i.name for i in obj.ingredients.all()[:3]])                                   # Show first 3 ingredients
-    ingredient_list.short_description = 'Ingredients'                                                   # Rename the column      
-    
-    def image_preview(self, obj):                                                                       # Show the image        
-        if obj.image:                                                                                   # If the image field is not empty
-            return format_html('<img src="{}" width="100" />', obj.image.url)                           # Show the image
-        return "No image"                                                                               # If the image field is empty
-    image_preview.short_description = 'Preview'                                                         # Rename the column
+    def ingredient_list(self, obj):
+        return ", ".join([i.name for i in obj.ingredients.all()[:3]])
+    ingredient_list.short_description = 'Ingredients'
+
+    def image_preview(self, obj):
+        if obj.pk and obj.image:
+            return format_html(
+                '<img src="{}" style="max-height: 100px;" />', 
+                obj.image.url
+            )
+        # For new unsaved objects
+        return format_html(
+            '<img id="live-preview" style="max-height: 100px; display: none;"/>'
+        )
+
+    class Media:
+        js = ('admin/js/dish_preview.js',)
 
     # Just in case the dish gets saved without ingredients, delete it
     # Note, there will be two errors, because I think Django's defaukt save method is called causing the success message, but it deletes the dish properly
-    def save_model(self, request, obj, form, change):                                                   # Save the model
-        if not form.cleaned_data.get('ingredients'):                                                    # If the ingredients field is empty
-            messages.error(                                                                             # Show an error message
+    def save_model(self, request, obj, form, change):
+        if not form.cleaned_data.get('ingredients'):
+            messages.error(
                 request,
                 f"Cannot save '{obj.name}' without ingredients!",
                 extra_tags="danger"
             )
-            return                                                                                      # Exit without saving
-    
-        super().save_model(request, obj, form, change)                                                  # Only save if ingredients exist
+            return
+        super().save_model(request, obj, form, change)
+
+    """
+    Override bulk deletion to properly delete images
+    """
+    def delete_queryset(self, request, queryset):
+        for dish in queryset:
+            # Delete main dish image
+            if dish.image:
+                try:
+                    if os.path.isfile(dish.image.path):
+                        os.remove(dish.image.path)
+                except PermissionError:
+                    import gc
+                    gc.collect()
+                    if os.path.isfile(dish.image.path):
+                        os.remove(dish.image.path)
+            
+            # Delete all step images
+            for step in dish.steps.all():
+                if step.image:
+                    try:
+                        if os.path.isfile(step.image.path):
+                            os.remove(step.image.path)
+                    except PermissionError:
+                        import gc
+                        gc.collect()
+                        if os.path.isfile(step.image.path):
+                            os.remove(step.image.path)
+        
+        # Now perform the bulk deletion
+        super().delete_queryset(request, queryset)
+        
+    def save_formset(self, request, form, formset, change):
+        instances = formset.save(commit=False)
+        for instance in instances:
+            # If it's a DishIngredient, make sure dish is set
+            if isinstance(instance, DishIngredient):
+                if not instance.dish_id:
+                    instance.dish = form.instance
+            instance.save()
+        formset.save_m2m()
 
 @admin.register(Ingredient)
 class IngredientAdmin(admin.ModelAdmin):
-    list_display = ('name', 'quantity', 'unit', 'quantity_with_unit', 'dish_count')                     # Display these fields
-    list_editable = ('quantity', 'unit')                                                                # Edit directly from list
-    search_fields = ('name',)                                                                           # Search by ingredient name
-    list_filter = ('unit',)                                                                             # Filter by unit    
-
-    def quantity_with_unit(self, obj):
-        return f"{obj.quantity} {obj.unit}" if obj.unit else obj.quantity
-    quantity_with_unit.short_description = 'Amount'
+    list_display = ('name', 'dish_count')
+    search_fields = ('name',)
     
     def dish_count(self, obj):
         return obj.dish_set.count()
     dish_count.short_description = 'Used In # Dishes'
 
-    def save_model(self, request, obj, form, change):                                                   # Save the model
-        if obj.quantity <= 0:                                                                           # If the quantity is less than or equal to 0
-            messages.error(request, "Quantity must be positive.", extra_tags="danger")                  # Show an error message
-            return                                                                                      # Don't save the model
-        super().save_model(request, obj, form, change)                                                  # Call the parent method
+@admin.register(Grocery)
+class GroceryAdmin(admin.ModelAdmin):
+    list_display = ('ingredient', 'purchased', 'created_at')
+    list_editable = ('purchased',)
+    autocomplete_fields = ['ingredient']  # Now this will work
+    
+    # Optional: customize how ingredients appear in the autocomplete
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        form.base_fields['ingredient'].label_from_instance = lambda inst: inst.name
+        return form
+    
+@admin.register(Unit)
+class UnitAdmin(admin.ModelAdmin):
+    list_display = ('name', 'abbreviation')
+    search_fields = ('name', 'abbreviation')

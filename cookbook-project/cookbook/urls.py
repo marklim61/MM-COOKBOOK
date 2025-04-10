@@ -15,11 +15,20 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path, include       # Add 'include'
-from django.conf import settings            # Add 'settings'
-from django.conf.urls.static import static  # Add 'static'
+from django.urls import path, include                               # Add 'include'
+from django.conf import settings                                    # Add 'settings'
+from django.conf.urls.static import static                          # Add 'static'
+from rest_framework.routers import DefaultRouter                    # Add 'DefaultRouter'
+from recipes import views                                           # Add 'views'
+
+router = DefaultRouter()                                            # Add 'DefaultRouter'
+router.register(r'dishes', views.DishViewSet)                       # Add 'DishViewSet'
+router.register(r'ingredients', views.IngredientViewSet)            # Add 'IngredientViewSet'
+router.register(r'grocery', views.GroceryViewSet)                   # Add 'GroceryViewSet'
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
-    path('', include('recipes.urls')),                              # Connects to your recipes app
-] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)   # Add 'static'
+    path('admin/', admin.site.urls),                                                            # Connects to your admin
+    path('', include('recipes.urls')),                                                          # Connects to your recipes app
+    path('api/', include(router.urls)),                                                         # Add 'router.urls'
+    path('api-auth/', include('rest_framework.urls')),                                          # Add 'rest_framework.urls'
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)                               # Add 'static' (for media files)
