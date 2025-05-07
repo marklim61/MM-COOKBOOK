@@ -6,11 +6,13 @@ from django.shortcuts import render
 from django.shortcuts import get_object_or_404 
 from rest_framework import viewsets 
 from rest_framework.decorators import api_view 
-from .models import Dish, Ingredient, Grocery  
+from .models import Dish, Ingredient, Grocery, DishIngredient, Unit 
 from .serializers import (
     DishSerializer,
     IngredientSerializer,
     GrocerySerializer,
+    DishIngredientSerializer,
+    UnitSerializer
 )
 
 """
@@ -70,3 +72,11 @@ class GroceryViewSet(viewsets.ModelViewSet):
         if purchased in ["true", "false"]:
             queryset = queryset.filter(purchased=purchased == "true")
         return queryset
+
+class DishIngredientViewSet(viewsets.ModelViewSet):
+    queryset = DishIngredient.objects.all()
+    serializer_class = DishIngredientSerializer
+
+class UnitViewSet(viewsets.ModelViewSet):
+    queryset = Unit.objects.all()
+    serializer_class = UnitSerializer

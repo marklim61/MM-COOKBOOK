@@ -73,15 +73,15 @@ class DishAdmin(admin.ModelAdmin):
 
     # Just in case the dish gets saved without ingredients, delete it
     # Note, there will be two errors, because I think Django's defaukt save method is called causing the success message, but it deletes the dish properly
-    def save_model(self, request, obj, form, change):
-        if not form.cleaned_data.get('ingredients'):
-            messages.error(
-                request,
-                f"Cannot save '{obj.name}' without ingredients!",
-                extra_tags="danger"
-            )
-            return
-        super().save_model(request, obj, form, change)
+    # def save_model(self, request, obj, form, change):
+    #     if not form.cleaned_data.get('ingredients'):
+    #         messages.error(
+    #             request,
+    #             f"Cannot save '{obj.name}' without ingredients!",
+    #             extra_tags="danger"
+    #         )
+    #         return
+    #     super().save_model(request, obj, form, change)
 
     """
     Override bulk deletion to properly delete images
@@ -128,6 +128,11 @@ class DishAdmin(admin.ModelAdmin):
 class IngredientAdmin(admin.ModelAdmin):
     list_display = ('name', 'dish_count')
     search_fields = ('name',)
+
+    def save_model(self, request, obj, form, change):
+        # convert name to lowercase before saving
+        obj.name = obj.name.lower()
+        super().save_model(request, obj, form, change)
     
     def dish_count(self, obj):
         return obj.dish_set.count()
@@ -149,3 +154,9 @@ class GroceryAdmin(admin.ModelAdmin):
 class UnitAdmin(admin.ModelAdmin):
     list_display = ('name', 'abbreviation')
     search_fields = ('name', 'abbreviation')
+
+    def save_model(self, request, obj, form, change):
+        # convert name and abbreviation to lowercase before saving
+        obj.name = obj.name.lower()
+        obj.abbreviation = obj.abbreviation.lower()
+        super().save_model(request, obj, form, change)

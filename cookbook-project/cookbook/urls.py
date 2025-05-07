@@ -25,6 +25,8 @@ router = DefaultRouter()                                            # Add 'Defau
 router.register(r'dishes', views.DishViewSet)                       # Add 'DishViewSet'
 router.register(r'ingredients', views.IngredientViewSet)            # Add 'IngredientViewSet'
 router.register(r'grocery', views.GroceryViewSet)                   # Add 'GroceryViewSet'
+router.register(r'dish-ingredients', views.DishIngredientViewSet)   # Add 'DishIngredientViewSet'
+router.register(r'units', views.UnitViewSet)
 
 urlpatterns = [
     path('admin/', admin.site.urls),                                                            # Connects to your admin
