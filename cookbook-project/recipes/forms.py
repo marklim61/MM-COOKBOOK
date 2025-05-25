@@ -16,21 +16,19 @@ class DishForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if 'ingredients' in self.fields:
-            del self.fields['ingredients']
+            del self.fields['ingredients']                              # remove the 'ingredients' field since i'm using DishIngredientInline
 
         self.fields['prep_time'].widget.attrs['min'] = 1
         self.fields['prep_time'].widget.attrs['max'] = 1440
         self.fields['cook_time'].widget.attrs['min'] = 0
         self.fields['cook_time'].widget.attrs['max'] = 1440
-        
-    def clean(self):
-        cleaned_data = super().clean()                              
-        return cleaned_data                                         # Return the cleaned data
-        # return self.data                                            # To intentionally skip validation to test the error in the admin if the dish gets saved without ingredients
+
+    # commented out because I learned that djangle handles clean() method automatically, removed save() method too for the same reason    
+    # def clean(self):
+    #     cleaned_data = super().clean()                              
+    #     return cleaned_data                                         # return the cleaned data
+        # return self.data                                            # this is used to intentionally skip validation to test the error in the admin if the dish gets saved without ingredients
     
-    def save(self, commit=True):
-        dish = super().save(commit=commit)
-        return dish
 """
 This form is used to create or update Grocery objects.
 """
@@ -56,8 +54,8 @@ class GroceryForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['ingredient'].queryset = Ingredient.objects.all().order_by('name')          # It sets the list of ingredients to be displayed in the form's dropdown menu
-        self.fields['ingredient'].required = False                                              # It makes the 'ingredient' field optional, allowing the field to be submitted empty                    
+        self.fields['ingredient'].queryset = Ingredient.objects.order_by('name')          # it sets the list of ingredients to be displayed in the form's dropdown menu
+        # self.fields['ingredient'].required = False                                              # it makes the 'ingredient' field optional, allowing the field to be submitted empty                    
 
     """
     This method is used to validate the form data.

@@ -1,26 +1,48 @@
-"""
-This file defines how Django REST Framework converts the model instances into JSON data(serialization)
-and vice versa(deserialization).
-Basic Structure: Each serializer is a class that inherits from serializers.ModelSerializer.
-It automatically generates fields based on the model.
-The Meta class inside each serializer specifies which model to use and which fields to include.
-"""
 from django.db import models
-from django.db import transaction  # Add this import
+from django.db import transaction
 from rest_framework import serializers
-from .models import (
-    Dish,
-    Ingredient,
-    Grocery,
-    CookingStep,
-    Unit,
-    DishIngredient,
-)
-import inflect                          # For plural/singular handling
+from .models import Dish, Ingredient, Grocery, CookingStep, Unit, DishIngredient
+import inflect
 
 p = inflect.engine()
 
-class IngredientSerializer(serializers.ModelSerializer):
+class BaseNormalizationMixin:
+    """Shared normalization and validation logic"""
+    def _normalize_name(self, name, is_ingredient=False, is_unit=False):
+        name = name.strip().lower()
+        if is_ingredient:
+            return p.singular_noun(name) or name
+        if is_unit:
+            return name[:-1] if name.endswith("s") and len(name) > 1 else name
+        return name
+
+    def _validate_unique_name(self, model, name_field, value, exclude_id=None):
+        norm_name = self._normalize_name(value, is_ingredient=(model == Ingredient))
+        query = model.objects.filter(
+            models.Q(**{f"{name_field}__iexact": norm_name})
+            | models.Q(**{f"{name_field}__iexact": p.plural(norm_name)})
+        )
+
+        if exclude_id:
+            query = query.exclude(id=exclude_id)
+
+        if conflict := query.first():
+            raise serializers.ValidationError(
+                f'Use existing "{getattr(conflict, name_field)}" (ID: {conflict.id}) instead'
+            )
+        return norm_name
+
+class IngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
+    def validate_name(self, value):
+        return self._validate_unique_name(Ingredient, "name", value)
+
+    def update(self, instance, validated_data):
+        if "name" in validated_data:
+            validated_data["name"] = self._validate_unique_name(
+                Ingredient, "name", validated_data["name"], instance.id
+            )
+        return super().update(instance, validated_data)
+
     class Meta:
         model = Ingredient
         fields = ["id", "name"]
@@ -31,14 +53,49 @@ class CookingStepSerializer(serializers.ModelSerializer):
         fields = ["id", "step_number", "instruction", "image"]
         extra_kwargs = {"image": {"required": False}}
 
-class UnitSerializer(serializers.ModelSerializer):
+
+class UnitSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
+    def validate(self, data):
+        for field in ["name", "abbreviation"]:
+            if not data.get(field, "").strip():
+                raise serializers.ValidationError(
+                    {field: f"{field.capitalize()} cannot be empty"}
+                )
+        return data
+
+    def _validate_unit(self, data, instance=None):
+        data["name"] = self._normalize_name(data["name"], is_unit=True)
+        data["abbreviation"] = self._normalize_name(data["abbreviation"], is_unit=True)
+
+        query = Unit.objects.filter(
+            models.Q(name__iexact=data["name"])
+            | models.Q(abbreviation__iexact=data["abbreviation"])
+        )
+
+        if instance:
+            query = query.exclude(id=instance.id)
+
+        if conflict := query.first():
+            raise serializers.ValidationError(
+                {"name": f'Unit conflict with "{conflict.name}" (ID: {conflict.id})'}
+            )
+        return data
+
+    def create(self, validated_data):
+        validated_data = self._validate_unit(validated_data)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data = self._validate_unit(validated_data, instance)
+        return super().update(instance, validated_data)
+
     class Meta:
         model = Unit
         fields = ["id", "name", "abbreviation"]
 
-class DishIngredientSerializer(serializers.ModelSerializer):
+class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
     ingredient = serializers.PrimaryKeyRelatedField(
-        queryset=Ingredient.objects.all(), required=False
+        queryset=Ingredient.objects.all(), required=False, pk_field=serializers.IntegerField()
     )
     ingredient_name = serializers.CharField(
         write_only=True, required=False, allow_blank=True
@@ -46,7 +103,7 @@ class DishIngredientSerializer(serializers.ModelSerializer):
     ingredient_detail = IngredientSerializer(source="ingredient", read_only=True)
 
     unit = serializers.PrimaryKeyRelatedField(
-        queryset=Unit.objects.all(), required=False
+        queryset=Unit.objects.all(), required=False, pk_field=serializers.IntegerField()
     )
     unit_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     unit_detail = UnitSerializer(source="unit", read_only=True)
@@ -64,131 +121,53 @@ class DishIngredientSerializer(serializers.ModelSerializer):
             "unit_detail",
         ]
 
-    """
-    Convert to singular form and lowercase
-    Two different algorithms for ingredient and unit
-    1. Ingredient: Have more irregular plural forms. p.singular_noun() is more sophisticated solution that handles irregularities
-    2. Unit: Units are more regular. Just remove the last 's' if it exists.
-    """
-    def normalize_name(self, name, is_ingredient=False, is_unit=False):
-        name = name.strip().lower()
-        if is_ingredient:
-            return p.singular_noun(name) or name
-        if is_unit:
-            # Handle common unit plurals (cups → cup, grams → gram)
-            if name.endswith('s') and len(name) > 1:
-                return name[:-1]
-            return name
-        return name
-
-    """
-    Validates the ingredient and unit data in the provided dictionary.
-    For ingredients:
-    - It attempts to match the provided ingredient name with existing ingredients,
-      considering both singular and plural forms.
-    - If a match is found, it raises a ValidationError, suggesting the use of the existing ingredient.
-    For units:
-    - It checks the unit name against existing units, considering both singular and plural forms,
-      as well as abbreviations up to the first three characters.
-    - If a match is found, it raises a ValidationError with details of the existing unit.
-    Returns:
-        The normalized data dictionary if no conflicts are found.
-    """
     def validate(self, data):
-        # INGREDIENT VALIDATION
-        if 'ingredient_name' in data:
-            norm_name = self.normalize_name(data['ingredient_name'], is_ingredient=True)            # Its's true because we're validating an ingredient
-            """
-            conflict is a variable that stores the result of the database query. It can hold one of two values:
-            1. An Ingredient object: if a matching ingredient is found in the database, conflict 
-            will be an instance of the Ingredient model, representing the conflicting ingredient.
-            2. None: if no matching ingredient is found in the database, conflict will be None.
-            """
-            conflict = Ingredient.objects.filter(                  # Conflict is a variable that stores the result of the database query
-                # Q stands for Query. models.Q is a way to create object that can be used to filter database queries.
-                # It's a way to build a query using a more Pythonic syntax, rather than writing raw SQL
-                models.Q(name__iexact=norm_name) |                                                                                  
-                models.Q(name__iexact=p.plural(norm_name))         # Check if there's an ingredient with the plural form of the name               
-            ).first()   # When using filter() or get() to retrieve objects from the DB, first() is a way to retrieve only the first object from the QuerySet
-            if conflict:
-                raise serializers.ValidationError({
-                    'ingredient_name': f'Use existing "{conflict.name}" (ID: {conflict.id}) instead'
-                })
-            data['ingredient_name'] = norm_name                     # Update the ingredient name which should be singular
+        if "ingredient_name" in data:
+            data["ingredient_name"] = self._validate_unique_name(
+                Ingredient, "name", data["ingredient_name"]
+            )
 
-        # UNIT VALIDATION
-        if 'unit_name' in data:
-            norm_unit = self.normalize_name(data['unit_name'], is_unit=True)
-            
-            # Check against both name and abbreviation in singular/plural forms
+        if "unit_name" in data:
+            norm_unit = self._normalize_name(data["unit_name"], is_unit=True)
             conflict = Unit.objects.filter(
-                models.Q(name__iexact=norm_unit) |
-                models.Q(name__iexact=norm_unit + 's') |  # Check plural version
-                models.Q(abbreviation__iexact=norm_unit[:3]) |
-                models.Q(abbreviation__iexact=(norm_unit + 's')[:3])
+                models.Q(name__iexact=norm_unit)
+                | models.Q(abbreviation__iexact=norm_unit[:3])
             ).first()
-            
+
             if conflict:
-                raise serializers.ValidationError({
-                    'unit_name': (
-                        f'Unit conflict: "{data["unit_name"]} matches '
-                        f'existing "{conflict.name}" (ID: {conflict.id}, '
-                        f'Abbr: {conflict.abbreviation})'
-                    )
-                })
-            data['unit_name'] = norm_unit  # Store normalized name
+                raise serializers.ValidationError(
+                    {
+                        "unit_name": f'Unit conflict with "{conflict.name}" (ID: {conflict.id})'
+                    }
+                )
+            data["unit_name"] = norm_unit
 
         return data
 
-    def create(self, validated_data):
-        # Handle Ingredient
-        if 'ingredient_name' in validated_data:
-            norm_name = validated_data.pop('ingredient_name')
-            ingredient, created = Ingredient.objects.get_or_create(
-                name__iexact=norm_name,
-                defaults={'name': norm_name.capitalize()}
+    def _handle_ingredient_or_unit(self, field_name, model, validated_data):
+        if f"{field_name}_name" in validated_data:
+            name = validated_data.pop(f"{field_name}_name")
+            is_ingredient = model == Ingredient
+            norm_name = self._normalize_name(
+                name, is_ingredient=is_ingredient, is_unit=not is_ingredient
             )
-            if not created and ingredient.name != norm_name.capitalize():
-                # Handle case where plural exists but singular doesn't
-                ingredient = Ingredient.objects.create(name=norm_name.capitalize())
-            validated_data['ingredient'] = ingredient
 
-        # Handle Unit
-        if 'unit_name' in validated_data:
-            norm_unit = validated_data.pop('unit_name')
-            
-            # Final check with lock to prevent race conditions
-            with transaction.atomic():
-                conflict = Unit.objects.select_for_update().filter(
-                    models.Q(name__iexact=norm_unit) |
-                    models.Q(name__iexact=norm_unit + 's') |
-                    models.Q(abbreviation__iexact=norm_unit[:3])
-                ).first()
-                
-                if conflict:
-                    raise serializers.ValidationError({
-                        'unit_name': f'Unit was just created: {conflict.name}'
-                    })
-                
-                unit = Unit.objects.create(
-                    name=norm_unit.capitalize(),
-                    abbreviation=norm_unit[:3]
-                )
-                validated_data['unit'] = unit
+            obj, _ = model.objects.get_or_create(
+                name__iexact=norm_name, defaults={"name": norm_name}
+            )
+            validated_data[field_name] = obj
 
-        return super().create(validated_data)
+    def create(self, validated_data):
+        with transaction.atomic():
+            self._handle_ingredient_or_unit("ingredient", Ingredient, validated_data)
+            self._handle_ingredient_or_unit("unit", Unit, validated_data)
+            return super().create(validated_data)
 
-class DishSerializer(serializers.ModelSerializer):
-    """
-    Parameters:
-    1. dishingredient_set is the reverse relation from Dish to DishIngredient, it returns a queryset of DishIngredient objects
-    2. many=True indicates that the serializer should expect multiple objects, dish can have a multiple DishIngredient objects and multiple CookingStep objects
-    3. read_only=True means that these fields will only be used for serialization.
-    """
+class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
     dish_ingredients = DishIngredientSerializer(
         source="dishingredient_set", many=True, required=False
     )
-    steps = CookingStepSerializer(many=True, read_only=True)
+    steps = CookingStepSerializer(many=True, required=False)
 
     class Meta:
         model = Dish
@@ -202,46 +181,121 @@ class DishSerializer(serializers.ModelSerializer):
             "cook_time",
             "image",
         ]
-        extra_kwargs = {"image": {"required": False}}
+        extra_kwargs = {
+            "image": {"required": False},
+            "dish_ingredients": {"style": {"base_template": "textarea.html"}},
+            "steps": {"style": {"base_template": "textarea.html"}},
+        }
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret["image"] = instance.image.url if instance.image else None
+        return ret
 
     def create(self, validated_data):
         ingredients_data = validated_data.pop("dishingredient_set", [])
+        steps_data = validated_data.pop("steps", [])
+
         dish = Dish.objects.create(**validated_data)
 
         for ingredient_data in ingredients_data:
-            # Handle ingredient
-            if "ingredient_name" in ingredient_data:
+        # Handle ingredient
+            ingredient = None
+            if 'ingredient' in ingredient_data:
+                # Case 1: Using existing ingredient by ID
+                ingredient = ingredient_data['ingredient']
+            elif 'ingredient_name' in ingredient_data:
+                # Case 2: Creating new ingredient by name
+                norm_name = self._normalize_name(ingredient_data['ingredient_name'], is_ingredient=True)
                 ingredient, _ = Ingredient.objects.get_or_create(
-                    name=ingredient_data.pop("ingredient_name")
+                    name__iexact=norm_name, 
+                    defaults={'name': norm_name}
                 )
-                ingredient_data["ingredient"] = ingredient
-
+            else:
+                raise serializers.ValidationError("Either 'ingredient' or 'ingredient_name' must be provided")
+            
             # Handle unit
-            if "unit_name" in ingredient_data:
+            unit = None
+            if 'unit' in ingredient_data:
+                # Case 1: Using existing unit by ID
+                unit = ingredient_data['unit']
+            elif 'unit_name' in ingredient_data:
+                # Case 2: Creating new unit by name
+                norm_unit = self._normalize_name(ingredient_data['unit_name'], is_unit=True)
                 unit, _ = Unit.objects.get_or_create(
-                    name=ingredient_data.pop("unit_name")
+                    name__iexact=norm_unit,
+                    defaults={'name': norm_unit}
                 )
-                ingredient_data["unit"] = unit
+            else:
+                raise serializers.ValidationError("Either 'unit' or 'unit_name' must be provided")
 
-            DishIngredient.objects.create(dish=dish, **ingredient_data)
+            # Validate quantity
+            if 'quantity' not in ingredient_data:
+                raise serializers.ValidationError("Quantity is required")
+
+            # Create DishIngredient
+            DishIngredient.objects.create(
+                dish=dish,
+                ingredient=ingredient,
+                unit=unit,
+                quantity=ingredient_data['quantity']
+            )
+
+        for step_data in steps_data:
+            CookingStep.objects.create(dish=dish, **step_data)
 
         return dish
-    
-    """
-    This is to include the image URL in the API response, rather than just the image object itself.
-    """
-    def to_representation(self, instance):
-        """Modify image URL in API response"""
-        ret = super().to_representation(instance)
-        if instance.image:
-            ret["image"] = instance.image.url
-        else:
-            ret["image"] = None
-        return ret
 
-class GrocerySerializer(serializers.ModelSerializer):
+class GrocerySerializer(serializers.ModelSerializer, BaseNormalizationMixin):
     ingredient_name = serializers.CharField(source="ingredient.name", read_only=True)
+    new_ingredient = serializers.CharField(
+        write_only=True, required=False, allow_blank=True
+    )
 
     class Meta:
         model = Grocery
-        fields = ["id", "ingredient", "ingredient_name", "purchased", "created_at"]
+        fields = [
+            "id",
+            "ingredient",
+            "ingredient_name",
+            "purchased",
+            "created_at",
+            "new_ingredient",
+        ]
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if self.instance is not None:
+            fields.pop("new_ingredient", None)
+        return fields
+
+    def validate(self, data):
+        if self.instance is None:
+            new_ingredient = data.get("new_ingredient", "").strip()
+            existing_ingredient = data.get("ingredient")
+
+            if new_ingredient:
+                norm_name = self._normalize_name(new_ingredient, is_ingredient=True)
+                if Grocery.objects.filter(
+                    ingredient__name__iexact=norm_name, purchased=False
+                ).exists():
+                    raise serializers.ValidationError(
+                        "This ingredient is already in your grocery list"
+                    )
+            elif not existing_ingredient:
+                raise serializers.ValidationError(
+                    "You must provide either an existing ingredient or a new one"
+                )
+        return data
+
+    def create(self, validated_data):
+        new_ingredient = validated_data.pop("new_ingredient", "").strip()
+
+        if new_ingredient:
+            norm_name = self._normalize_name(new_ingredient, is_ingredient=True)
+            ingredient, _ = Ingredient.objects.get_or_create(
+                name__iexact=norm_name, defaults={"name": norm_name}
+            )
+            validated_data["ingredient"] = ingredient
+
+        return super().create(validated_data)

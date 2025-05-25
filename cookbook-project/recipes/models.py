@@ -4,13 +4,28 @@ This file defines the structure of the database tables for the app.
 It serves as the single source of truth for how the data is stored, retrieved, and validated.
 """
 from django.db import models
-from django.core.validators import (   
+from django.core.validators import (
     MinValueValidator,
     MaxValueValidator,
     FileExtensionValidator,
 )
 from django.core.exceptions import ValidationError
 import os
+import gc
+import inflect
+
+p = inflect.engine()
+
+class BaseNormalizationMixin:
+    def _normalize_name(self, name, is_ingredient=False, is_unit=False, is_abbr=False):
+        name = name.strip().lower()
+        if is_ingredient:
+            return p.singular_noun(name) or name
+        if is_unit:
+            return name[:-1] if name.endswith("s") and len(name) > 1 else name
+        if is_abbr:
+            return p.singular_noun(name) or name
+        return name
 
 """
 Ingredient model to store information about each ingredients with a single field for name.
@@ -18,26 +33,47 @@ And only two methods:
 1. __str__
 2. dish_count.
 """
-class Ingredient(models.Model):
+class Ingredient(models.Model, BaseNormalizationMixin):
     name = models.CharField(
         max_length=100,
         unique=True,
-        error_messages={
-            "unique": "This ingredient name already exist."
-        },
+        error_messages={"unique": "This ingredient name already exist."},
     )
 
-    def __str__(self):                                          # Returns a string of the ingredient, which is the name of the ingredient
-        return (
-            self.name
-        )
+    def __str__(
+        self,
+    ):  # returns a string of the ingredient, which is the name of the ingredient
+        return self.name
 
-    def dish_count(self):                                       # Returns the number of dishes that use this ingredient
+    def dish_count(self):  # returns the number of dishes that use this ingredient
         return self.dish_set.count()
 
-    dish_count.short_description = "Used In # Dishes"           # Renames the column in the admin panel
+    def clean(self):
+        """
+        Validates against case-insensitive duplicates and singular/plural conflicts
+        before saving to database.
+        """
+        normalized_name = self._normalize_name(self.name, is_ingredient=True)
 
+        # Check for case-insensitive matches
+        duplicates = Ingredient.objects.filter(
+            models.Q(name__iexact=self.name) | models.Q(name__iexact=normalized_name)
+        ).exclude(pk=self.pk)
 
+        if duplicates.exists():
+            conflict = duplicates.first()
+            raise ValidationError(
+                f'Similar ingredient already exists: "{conflict.name}" (ID: {conflict.id})'
+            )
+
+    def save(self, *args, **kwargs):
+        self.name = self._normalize_name(self.name, is_ingredient=True)
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    dish_count.short_description = (
+        "Used In # Dishes"  # renames the column in the admin panel
+    )
 """
 Dish model to store information about each dish with fields for name, description, ingredients, prep_time, cook_time, and image.
 And only two methods: 
@@ -53,27 +89,22 @@ class Dish(models.Model):
     description = models.TextField(blank=True)
     ingredients = models.ManyToManyField(
         Ingredient,
-        through="DishIngredient",                               # DishIngredient is the intermediate model that connects Dish and Ingredient
-        through_fields=("dish", "ingredient"),                  # This allows Django to create m2m relationships between Dish and Ingredient through DishIngredient
-    )                                                           # Example: Dish: Pasta, Ingredient: Ground Beef, DishIngredient: Pasta -> 2 lbs Ground Beef
+        through="DishIngredient",  # DishIngredient is the intermediate model that connects Dish and Ingredient
+        through_fields=(
+            "dish",
+            "ingredient",
+        ),  # This allows Django to create m2m relationships between Dish and Ingredient through DishIngredient
+    )  # Example: Dish: Pasta, Ingredient: Ground Beef, DishIngredient: Pasta -> 2 lbs Ground Beef
     prep_time = models.PositiveIntegerField(
         validators=[
-            MinValueValidator(
-                1, message="Prep time must be at least 1 minute."
-            ),
-            MaxValueValidator(
-                1440, message="Prep time cannot exceed 24 hours."
-            ),
+            MinValueValidator(1, message="Prep time must be at least 1 minute."),
+            MaxValueValidator(1440, message="Prep time cannot exceed 24 hours."),
         ]
     )
     cook_time = models.PositiveIntegerField(
         validators=[
-            MinValueValidator(
-                0, message="Cook time cannot be negative."
-            ),
-            MaxValueValidator(
-                1440, message="Cook time cannot exceed 24 hours."
-            ),
+            MinValueValidator(0, message="Cook time cannot be negative."),
+            MaxValueValidator(1440, message="Cook time cannot exceed 24 hours."),
         ]
     )
     """
@@ -82,7 +113,7 @@ class Dish(models.Model):
     """
     def validate_image_size(value):
         filesize = value.size
-        max_size = 5 * 1024 * 1024                      # 5MB, iPhone photos are often 3-8MB
+        max_size = 5 * 1024 * 1024  # 5MB, iPhone photos are often 3-8MB
         if filesize > max_size:
             raise ValidationError(
                 f"Max image size is {max_size/1024/1024}MB. Your file is {filesize/1024/1024:.1f}MB."
@@ -94,14 +125,12 @@ class Dish(models.Model):
     also I want the iamges to be uniform in size for the grid view
     """
     def validate_image_dimensions(value):
-        from PIL import Image                           # Import the Image class
+        from PIL import Image  # Import the Image class
 
-        img = Image.open(value)                         # Open the image
-        width, height = img.size                        # Get the image dimensions
-        max_resolution = 3000                           # 3K resolution
-        if (
-            width > max_resolution or height > max_resolution
-        ):
+        img = Image.open(value)  # Open the image
+        width, height = img.size  # Get the image dimensions
+        max_resolution = 3000  # 3K resolution
+        if width > max_resolution or height > max_resolution:
             raise ValidationError(
                 f"Max resolution is {max_resolution}x{max_resolution}px. Your image is {width}x{height}px."
             )
@@ -110,9 +139,7 @@ class Dish(models.Model):
         upload_to="dish_images/",
         blank=True,
         validators=[
-            FileExtensionValidator(
-                allowed_extensions=["jpg", "jpeg", "png", "webp"]
-            ),
+            FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "webp"]),
             validate_image_size,
             validate_image_dimensions,
         ],
@@ -130,7 +157,7 @@ class Dish(models.Model):
         and store multiple errors in a single data structure, so it can return a single error
         object all the error messages, rather than raising an error for each validation failure.
         """
-        errors = {}                                
+        errors = {}
 
         if self.prep_time is None:
             errors["prep_time"] = "Prep time is required."
@@ -149,11 +176,9 @@ class Dish(models.Model):
             raise ValidationError(errors)
 
     def total_time(self):
-        return (
-            self.prep_time + self.cook_time
-        )
+        return self.prep_time + self.cook_time
 
-    def __str__(self): 
+    def __str__(self):
         return self.name
 
     """
@@ -168,25 +193,20 @@ class Dish(models.Model):
                 if os.path.isfile(self.image.path):
                     os.remove(self.image.path)
             except PermissionError:
-                import gc
-
                 gc.collect()
                 if os.path.isfile(self.image.path):
                     os.remove(self.image.path)
 
         # Delete all step images
-        for step in self.steps.all():  # Uses the reverse relation from Dish to CookingStep, allows access to all steps for this dish
+        for (step) in (self.steps.all()):  # uses the reverse relation from Dish to CookingStep, allows access to all steps for this dish
             if step.image:
                 try:
                     if os.path.isfile(step.image.path):
                         os.remove(step.image.path)
                 except PermissionError:
-                    import gc
-
                     gc.collect()
                     if os.path.isfile(step.image.path):
                         os.remove(step.image.path)
-
         super().delete(*args, **kwargs)
 
     def save(self, *args, **kwargs):
@@ -204,12 +224,58 @@ class Dish(models.Model):
 """
 This model is used to store the units of measurement for ingredients.
 """
-class Unit(models.Model):
-    name = models.CharField(max_length=20, unique=True)
-    abbreviation = models.CharField(max_length=10, blank=True)
+class Unit(models.Model, BaseNormalizationMixin):
+    name = models.CharField(
+        max_length=20,
+        unique=True,
+        error_messages={"unique": "This unit name already exists."},
+    )
+    abbreviation = models.CharField(
+        max_length=10,
+        blank=True,
+        error_messages={"unique": "This abbreviation already exists."},
+    )
 
     def __str__(self):
         return self.abbreviation if self.abbreviation else self.name
+
+    def clean(self):
+        """Validate both name and abbreviation for conflicts"""
+        # Check name conflicts
+        if (
+            Unit.objects.filter(
+                models.Q(name__iexact=self.name)
+                | models.Q(name__iexact=self._normalize_name(self.name, is_unit=True))
+            )
+            .exclude(pk=self.pk)
+            .exists()
+        ):
+            raise ValidationError({"name": "Unit with similar name already exists"})
+
+        # Check abbreviation conflicts if exists
+        if self.abbreviation:
+            if (
+                Unit.objects.filter(
+                    models.Q(abbreviation__iexact=self.abbreviation)
+                    | models.Q(
+                        abbreviation__iexact=self._normalize_name(
+                            self.abbreviation, is_abbr=True
+                        )
+                    )
+                )
+                .exclude(pk=self.pk)
+                .exists()
+            ):
+                raise ValidationError(
+                    {"abbreviation": "This abbreviation is already in use"}
+                )
+
+    def save(self, *args, **kwargs):
+        self.name = self._normalize_name(self.name, is_unit=True)
+        if self.abbreviation:
+            self.abbreviation = self._normalize_name(self.abbreviation, is_abbr=True)
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 """
 This model is used to store the ingredients for each dish.
@@ -218,7 +284,9 @@ class DishIngredient(models.Model):
     dish = models.ForeignKey(Dish, on_delete=models.CASCADE)
     ingredient = models.ForeignKey(Ingredient, on_delete=models.CASCADE)
     quantity = models.DecimalField(
-        max_digits=6, decimal_places=2, validators=[MinValueValidator(0.01)]
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0, message="Quantity must be greater than 0")]
     )
     unit = models.ForeignKey(Unit, on_delete=models.PROTECT)
 
@@ -238,7 +306,16 @@ class Grocery(models.Model):
     ingredient = models.ForeignKey(
         Ingredient, on_delete=models.CASCADE, verbose_name="Item to buy"
     )
-    purchased = models.BooleanField(default=False)
+    in_cart = models.BooleanField(
+        default=False,
+        verbose_name="Added to cart",
+        help_text="Check if this item is in your cart",
+    )
+    is_optional = models.BooleanField(
+        default=False,
+        verbose_name="Optional",
+        help_text="Check if this item is optional",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -246,7 +323,7 @@ class Grocery(models.Model):
 
     class Meta:
         verbose_name_plural = "Groceries"
-        ordering = ["-purchased", "ingredient__name"]
+        ordering = ["-in_cart", "ingredient__name"]
 
 """
 This model is used to store the steps for each dish.
