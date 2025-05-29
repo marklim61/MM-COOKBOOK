@@ -137,16 +137,23 @@ class UnitSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
         fields = ["id", "name", "abbreviation"]
 
 class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
-    ingredient = serializers.PrimaryKeyRelatedField(
-        queryset=Ingredient.objects.all(), required=False, pk_field=serializers.IntegerField()
+    # Remove source='ingredient' to avoid conflict with to_internal_value method
+    ingredient_id = serializers.PrimaryKeyRelatedField(
+        queryset=Ingredient.objects.all(), 
+        required=False, 
+        write_only=True,
+        source='ingredient'  # Add this back to properly map to the model field
     )
     ingredient_name = serializers.CharField(
         write_only=True, required=False, allow_blank=True
     )
     ingredient_detail = IngredientSerializer(source="ingredient", read_only=True)
 
-    unit = serializers.PrimaryKeyRelatedField(
-        queryset=Unit.objects.all(), required=False, pk_field=serializers.IntegerField()
+    unit_id = serializers.PrimaryKeyRelatedField(
+        queryset=Unit.objects.all(), 
+        required=False, 
+        write_only=True,
+        source='unit'  # Add this back to properly map to the model field
     )
     unit_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     unit_detail = UnitSerializer(source="unit", read_only=True)
@@ -155,14 +162,33 @@ class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMix
         model = DishIngredient
         fields = [
             "id",
-            "ingredient",
+            "ingredient_id", 
             "ingredient_name",
             "ingredient_detail",
             "quantity",
-            "unit",
+            "unit_id",
             "unit_name",
             "unit_detail",
         ]
+
+    def to_internal_value(self, data):
+        """Handle both 'ingredient' and 'ingredient_id' field names for backward compatibility"""
+        if isinstance(data, dict):
+            data = data.copy()  # Don't modify original
+            
+            # Handle ingredient
+            if 'ingredient_id' in data:
+                if isinstance(data['ingredient_id'], dict):
+                    # If it's an object, extract the ID
+                    data['ingredient_id'] = data['ingredient_id'].get('id', data['ingredient_id'])
+            
+            # Handle unit
+            if 'unit_id' in data:
+                if isinstance(data['unit_id'], dict):
+                    # If it's an object, extract the ID
+                    data['unit_id'] = data['unit_id'].get('id', data['unit_id'])
+        
+        return super().to_internal_value(data)
 
     def _get_or_create_ingredient(self, name):
         """Get or create ingredient with proper validation"""
@@ -206,22 +232,34 @@ class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMix
 
     def create(self, validated_data):
         with transaction.atomic():
-            # handle ingredient
+            # Handle ingredient - priority: ingredient_name over ingredient_id
+            ingredient_from_name = None
             if 'ingredient_name' in validated_data:
                 ingredient_name = validated_data.pop('ingredient_name')
-                validated_data['ingredient'] = self._get_or_create_ingredient(ingredient_name)
+                if ingredient_name and ingredient_name.strip():  # only if not empty
+                    ingredient_from_name = self._get_or_create_ingredient(ingredient_name)
             
-            # handle unit
+            # Handle unit - priority: unit_name over unit_id
+            unit_from_name = None
             if 'unit_name' in validated_data:
                 unit_name = validated_data.pop('unit_name')
-                validated_data['unit'] = self._get_or_create_unit(unit_name)
+                if unit_name and unit_name.strip():  # only if not empty
+                    unit_from_name = self._get_or_create_unit(unit_name)
+            
+            # Set ingredient: prefer created from name, fallback to provided ID
+            if ingredient_from_name:
+                validated_data['ingredient'] = ingredient_from_name
+            elif 'ingredient' not in validated_data or validated_data['ingredient'] is None:
+                raise serializers.ValidationError("Either 'ingredient_id' or 'ingredient_name' must be provided")
+            
+            # Set unit: prefer created from name, fallback to provided ID
+            if unit_from_name:
+                validated_data['unit'] = unit_from_name
             
             return super().create(validated_data)
 
 class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
-    dish_ingredients = DishIngredientSerializer(
-        source="dishingredient_set", many=True, required=False
-    )
+    dishingredient_set = DishIngredientSerializer(many=True, required=False)
     steps = CookingStepSerializer(many=True, required=False)
 
     class Meta:
@@ -230,7 +268,7 @@ class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
             "id",
             "name",
             "description",
-            "dish_ingredients",
+            "dishingredient_set",
             "steps",
             "prep_time",
             "cook_time",
@@ -253,17 +291,45 @@ class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
 
         dish = Dish.objects.create(**validated_data)
 
-        # use DishIngredientSerializer for consistent validation
+        # Create dish ingredients
         for ingredient_data in ingredients_data:
-            ingredient_data['dish'] = dish.id
-            serializer = DishIngredientSerializer(data=ingredient_data)
-            serializer.is_valid(raise_exception=True)
-            serializer.save(dish=dish)
+            DishIngredient.objects.create(dish=dish, **ingredient_data)
 
         for step_data in steps_data:
             CookingStep.objects.create(dish=dish, **step_data)
 
         return dish
+    
+    def update(self, instance, validated_data):
+        ingredients_data = validated_data.pop("dishingredient_set", None)
+        steps_data = validated_data.pop("steps", None)
+        
+        # Update the main dish fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        # Handle dish_ingredients if provided
+        if ingredients_data is not None:
+            with transaction.atomic():
+                # Clear existing ingredients
+                instance.dishingredient_set.all().delete()
+                
+                # Create new ingredients
+                for ingredient_data in ingredients_data:
+                    DishIngredient.objects.create(dish=instance, **ingredient_data)
+        
+        # Handle steps if provided
+        if steps_data is not None:
+            with transaction.atomic():
+                # Clear existing steps
+                instance.steps.all().delete()
+                
+                # Create new steps
+                for step_data in steps_data:
+                    CookingStep.objects.create(dish=instance, **step_data)
+        
+        return instance
 
 class GrocerySerializer(serializers.ModelSerializer):
     class Meta:

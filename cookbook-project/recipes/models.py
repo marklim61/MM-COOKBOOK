@@ -61,10 +61,10 @@ class Ingredient(models.Model, BaseNormalizationMixin):
         error_messages={"unique": "This ingredient name already exist."},
     )
 
-    # def __str__(
-    #     self,
-    # ):  # returns a string of the ingredient, which is the name of the ingredient
-    #     return self.name
+    def __str__(
+        self,
+    ):  # returns a string of the ingredient, which is the name of the ingredient
+        return self.name
 
     def dish_count(self):  # returns the number of dishes that use this ingredient
         return self.dish_set.count()
