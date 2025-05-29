@@ -6,8 +6,8 @@ import gc
 from django.core.exceptions import ValidationError
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import Dish, Ingredient, Grocery, CookingStep, DishIngredient, Unit
-from .forms import DishForm
+from .models import Dish, Ingredient, GroceryItem, CookingStep, DishIngredient, Unit
+from .forms import DishForm, GroceryItemForm
 
 class CookingStepInline(admin.TabularInline):
     model = CookingStep
@@ -127,23 +127,32 @@ class IngredientAdmin(admin.ModelAdmin):
         return obj.dish_set.count()
     dish_count.short_description = 'Used In # Dishes'
 
-@admin.register(Grocery)
-class GroceryAdmin(admin.ModelAdmin):
-    list_display = ('ingredient', 'in_cart', 'is_optional', 'created_at')
+@admin.register(GroceryItem)
+class GroceryItemAdmin(admin.ModelAdmin):
+    form = GroceryItemForm
+    list_display = ('name', 'in_cart', 'is_optional', 'created_at')
     list_editable = ('in_cart', 'is_optional')
-    list_filter = ('in_cart', 'is_optional')
-    autocomplete_fields = ['ingredient']
+    list_filter = ('in_cart', 'is_optional', 'created_at')
+    search_fields = ('name',)
+    ordering = ['-in_cart', 'name']
+    
+    # Remove the add view fields you don't want to show
+    fields = ('name', 'in_cart', 'is_optional')
     
     def save_model(self, request, obj, form, change):
-        duplicate_exists = Grocery.objects.filter(
-            ingredient=obj.ingredient
+        # Check for duplicates in grocery items only (case-insensitive)
+        duplicate_exists = GroceryItem.objects.filter(
+            name__iexact=obj.name.strip()
         ).exclude(pk=obj.pk).exists()
         
         if duplicate_exists:
             raise ValidationError(
-                f'"{obj.ingredient.name}" already exists in your grocery list. '
+                f'"{obj.name}" already exists in your grocery list. '
                 'Please edit the existing item instead.'
             )
+        
+        # Clean and save the name
+        obj.name = obj.name.strip().title()  # Capitalize first letter of each word
         super().save_model(request, obj, form, change)
     
 @admin.register(Unit)

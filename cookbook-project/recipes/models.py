@@ -12,21 +12,42 @@ from django.core.validators import (
 from django.core.exceptions import ValidationError
 import os
 import gc
-import inflect
-
-p = inflect.engine()
 
 class BaseNormalizationMixin:
     def _normalize_name(self, name, is_ingredient=False, is_unit=False, is_abbr=False):
+        return name.strip().lower()
+    
+    """
+        Generate similar terms for duplicate checking.
+        Add logic here for terms that should be considered duplicates.
+    """
+    def _get_similar_terms(self, name):
         name = name.strip().lower()
-        if is_ingredient:
-            return p.singular_noun(name) or name
-        if is_unit:
-            return name[:-1] if name.endswith("s") and len(name) > 1 else name
-        if is_abbr:
-            return p.singular_noun(name) or name
-        return name
+        similar_terms = [name]
+        
+        # define groups of similar terms
+        similar_groups = [
+            ['pieces', 'piece', 'pcs', 'pc'],
+            ['tablespoons', 'tablespoon', 'tbsp', 'tbs'],
+            ['teaspoons', 'teaspoon', 'tsp', 'ts'],
+            ['pounds', 'pound', 'lbs', 'lb'],
+            ['ounces', 'ounce', 'oz'],
+            ['cups', 'cup', 'c'],
+            ['minutes', 'minute', 'mins', 'min'],
+            ['hours', 'hour', 'hrs', 'hr'],
+            ['grams', 'gram', 'g'],
+            ['kilograms', 'kilogram', 'kg'],
+        ]
 
+    # find which group this term belongs to
+        for group in similar_groups:
+            if name in group:
+                similar_terms.extend(group)
+                break
+        
+        # remove duplicates and return
+        return list(set(similar_terms))
+    
 """
 Ingredient model to store information about each ingredients with a single field for name.
 And only two methods: 
@@ -40,30 +61,34 @@ class Ingredient(models.Model, BaseNormalizationMixin):
         error_messages={"unique": "This ingredient name already exist."},
     )
 
-    def __str__(
-        self,
-    ):  # returns a string of the ingredient, which is the name of the ingredient
-        return self.name
+    # def __str__(
+    #     self,
+    # ):  # returns a string of the ingredient, which is the name of the ingredient
+    #     return self.name
 
     def dish_count(self):  # returns the number of dishes that use this ingredient
         return self.dish_set.count()
 
     def clean(self):
         """
-        Validates against case-insensitive duplicates and singular/plural conflicts
+        Validates against case-insensitive duplicates and similar term conflicts
         before saving to database.
         """
         normalized_name = self._normalize_name(self.name, is_ingredient=True)
+        similar_terms = self._get_similar_terms(normalized_name)
 
-        # Check for case-insensitive matches
-        duplicates = Ingredient.objects.filter(
-            models.Q(name__iexact=self.name) | models.Q(name__iexact=normalized_name)
-        ).exclude(pk=self.pk)
+        # build query to check for any similar terms
+        query = models.Q()
+        for term in similar_terms:
+            query |= models.Q(name__iexact=term)
+
+        duplicates = Ingredient.objects.filter(query).exclude(pk=self.pk)
 
         if duplicates.exists():
             conflict = duplicates.first()
             raise ValidationError(
-                f'Similar ingredient already exists: "{conflict.name}" (ID: {conflict.id})'
+                f'Similar ingredient already exists: "{conflict.name}" (ID: {conflict.id}). '
+                f'Terms like "{", ".join(similar_terms)}" are considered duplicates.'
             )
 
     def save(self, *args, **kwargs):
@@ -240,35 +265,37 @@ class Unit(models.Model, BaseNormalizationMixin):
         return self.abbreviation if self.abbreviation else self.name
 
     def clean(self):
-        """Validate both name and abbreviation for conflicts"""
-        # Check name conflicts
-        if (
-            Unit.objects.filter(
-                models.Q(name__iexact=self.name)
-                | models.Q(name__iexact=self._normalize_name(self.name, is_unit=True))
-            )
-            .exclude(pk=self.pk)
-            .exists()
-        ):
-            raise ValidationError({"name": "Unit with similar name already exists"})
+        """Validate both name and abbreviation for conflicts including similar terms"""
+        # check name conflicts
+        name_similar_terms = self._get_similar_terms(self.name)
+        name_query = models.Q()
+        for term in name_similar_terms:
+            name_query |= models.Q(name__iexact=term) | models.Q(abbreviation__iexact=term)
 
-        # Check abbreviation conflicts if exists
+        name_conflicts = Unit.objects.filter(name_query).exclude(pk=self.pk)
+        
+        if name_conflicts.exists():
+            conflict = name_conflicts.first()
+            raise ValidationError({
+                "name": f'Unit conflict with "{conflict.name}" (ID: {conflict.id}). '
+                       f'Similar terms: {", ".join(name_similar_terms)}'
+            })
+
+        # check abbreviation conflicts if exists
         if self.abbreviation:
-            if (
-                Unit.objects.filter(
-                    models.Q(abbreviation__iexact=self.abbreviation)
-                    | models.Q(
-                        abbreviation__iexact=self._normalize_name(
-                            self.abbreviation, is_abbr=True
-                        )
-                    )
-                )
-                .exclude(pk=self.pk)
-                .exists()
-            ):
-                raise ValidationError(
-                    {"abbreviation": "This abbreviation is already in use"}
-                )
+            abbr_similar_terms = self._get_similar_terms(self.abbreviation)
+            abbr_query = models.Q()
+            for term in abbr_similar_terms:
+                abbr_query |= models.Q(name__iexact=term) | models.Q(abbreviation__iexact=term)
+
+            abbr_conflicts = Unit.objects.filter(abbr_query).exclude(pk=self.pk)
+            
+            if abbr_conflicts.exists():
+                conflict = abbr_conflicts.first()
+                raise ValidationError({
+                    "abbreviation": f'Abbreviation conflict with "{conflict.name}" (ID: {conflict.id}). '
+                                   f'Similar terms: {", ".join(abbr_similar_terms)}'
+                })
 
     def save(self, *args, **kwargs):
         self.name = self._normalize_name(self.name, is_unit=True)
@@ -302,10 +329,13 @@ class DishIngredient(models.Model):
 """
 This model is used to store the groceries for each ingredient.
 """
-class Grocery(models.Model):
-    ingredient = models.ForeignKey(
-        Ingredient, on_delete=models.CASCADE, verbose_name="Item to buy"
-    )
+class GroceryItem(models.Model):
+    """
+    Separate model for grocery items that doesn't depend on Ingredient model
+    """
+    name = models.CharField(max_length=100)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    unit = models.ForeignKey(Unit, on_delete=models.PROTECT, blank=True, null=True)
     in_cart = models.BooleanField(
         default=False,
         verbose_name="Added to cart",
@@ -319,11 +349,11 @@ class Grocery(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return str(self.ingredient)
+        return self.name
 
     class Meta:
-        verbose_name_plural = "Groceries"
-        ordering = ["-in_cart", "ingredient__name"]
+        verbose_name_plural = "Grocery Items"
+        ordering = ["-in_cart", "name"]
 
 """
 This model is used to store the steps for each dish.

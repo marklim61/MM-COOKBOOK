@@ -9,7 +9,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from .models import Dish, Ingredient, Grocery, DishIngredient, Unit
+from .models import Dish, Ingredient, GroceryItem, DishIngredient, Unit
 from .serializers import (
     DishSerializer,
     IngredientSerializer,
@@ -69,20 +69,45 @@ class IngredientViewSet(viewsets.ModelViewSet):
 This class creates an API endpoint for managing grocery objects using Django REST Framework.
 """
 class GroceryViewSet(viewsets.ModelViewSet):
-    queryset = Grocery.objects.all().order_by("-created_at")
+    queryset = GroceryItem.objects.all()
     serializer_class = GrocerySerializer
-
-    """
-    1.Retrieves initial queryset of Grocery objects
-    2. Filters the queryset based on the "purchased" query parameter, if provided
-    3. Returns the filtered queryset
-    """
+    
     def get_queryset(self):
-        queryset = super().get_queryset()
-        purchased = self.request.query_params.get("purchased")
-        if purchased in ["true", "false"]:
-            queryset = queryset.filter(purchased=purchased == "true")
-        return queryset
+        """Custom queryset with filtering options"""
+        queryset = GroceryItem.objects.all()
+        
+        # Filter by cart status
+        in_cart = self.request.query_params.get('in_cart', None)
+        if in_cart is not None:
+            queryset = queryset.filter(in_cart=in_cart.lower() == 'true')
+        
+        # Filter by optional status
+        is_optional = self.request.query_params.get('is_optional', None)
+        if is_optional is not None:
+            queryset = queryset.filter(is_optional=is_optional.lower() == 'true')
+        
+        # Search by name
+        search = self.request.query_params.get('search', None)
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+
+        return queryset.order_by('-in_cart', 'name')
+    @action(detail=False, methods=['post'])
+    def mark_all_in_cart(self, request):
+        """Mark all unchecked items as in cart"""
+        updated_count = GroceryItem.objects.filter(in_cart=False).update(in_cart=True)
+        return Response({
+            'message': f'{updated_count} items marked as in cart'
+        })
+    
+    @action(detail=False, methods=['post'])
+    def clear_cart(self, request):
+        """Remove all items that are in cart"""
+        deleted_count = GroceryItem.objects.filter(in_cart=True).count()
+        GroceryItem.objects.filter(in_cart=True).delete()
+        return Response({
+            'message': f'{deleted_count} items removed from grocery list'
+        })
 
 class DishIngredientViewSet(viewsets.ModelViewSet):
     queryset = DishIngredient.objects.all()

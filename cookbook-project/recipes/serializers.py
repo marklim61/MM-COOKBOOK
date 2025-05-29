@@ -1,47 +1,87 @@
 from django.db import models
 from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
-from .models import Dish, Ingredient, Grocery, CookingStep, Unit, DishIngredient
-import inflect
-
-p = inflect.engine()
+from .models import Dish, Ingredient, GroceryItem, CookingStep, Unit, DishIngredient
 
 class BaseNormalizationMixin:
     """Shared normalization and validation logic"""
-    def _normalize_name(self, name, is_ingredient=False, is_unit=False):
+    def _normalize_name(self, name):
+        return name.strip().lower()
+
+    def _get_similar_terms(self, name):
+        """Use the same similar terms logic as models"""
         name = name.strip().lower()
-        if is_ingredient:
-            return p.singular_noun(name) or name
-        if is_unit:
-            return name[:-1] if name.endswith("s") and len(name) > 1 else name
-        return name
+        similar_terms = [name]
+        
+        similar_groups = [
+            ['pieces', 'piece', 'pcs', 'pc'],
+            ['tablespoons', 'tablespoon', 'tbsp', 'tbs'],
+            ['teaspoons', 'teaspoon', 'tsp', 'ts'],
+            ['pounds', 'pound', 'lbs', 'lb'],
+            ['ounces', 'ounce', 'oz'],
+            ['cups', 'cup', 'c'],
+            ['minutes', 'minute', 'mins', 'min'],
+            ['hours', 'hour', 'hrs', 'hr'],
+            ['grams', 'gram', 'g'],
+            ['kilograms', 'kilogram', 'kg'],
+        ]
 
-    def _validate_unique_name(self, model, name_field, value, exclude_id=None):
-        norm_name = self._normalize_name(value, is_ingredient=(model == Ingredient))
-        query = model.objects.filter(
-            models.Q(**{f"{name_field}__iexact": norm_name})
-            | models.Q(**{f"{name_field}__iexact": p.plural(norm_name)})
-        )
+        for group in similar_groups:
+            if name in group:
+                similar_terms.extend(group)
+                break
+        
+        return list(set(similar_terms))
 
-        if exclude_id:
-            query = query.exclude(id=exclude_id)
-
-        if conflict := query.first():
-            raise serializers.ValidationError(
-                f'Use existing "{getattr(conflict, name_field)}" (ID: {conflict.id}) instead'
-            )
-        return norm_name
+    def _validate_model_instance(self, instance):
+        """Helper to call model validation and convert Django ValidationError to DRF"""
+        try:
+            instance.full_clean()
+        except DjangoValidationError as e:
+            if hasattr(e, 'error_dict'):
+                raise serializers.ValidationError(e.error_dict)
+            else:
+                raise serializers.ValidationError(str(e))
 
 class IngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
     def validate_name(self, value):
-        return self._validate_unique_name(Ingredient, "name", value)
+        # create temporary instance to test validation
+        normalized_value = self._normalize_name(value)
+
+        # check for similar terms conflicts manually since we can't rely on model validation here
+        similar_terms = self._get_similar_terms(normalized_value)
+        
+        # Build query to check for conflicts with similar terms
+        query = models.Q()
+        for term in similar_terms:
+            query |= models.Q(name__iexact=term)
+        
+        # Exclude current instance if updating
+        existing_ingredients = Ingredient.objects.filter(query)
+        if self.instance:
+            existing_ingredients = existing_ingredients.exclude(pk=self.instance.pk)
+        
+        if existing_ingredients.exists():
+            conflict = existing_ingredients.first()
+            raise serializers.ValidationError(
+                f'Similar ingredient already exists: "{conflict.name}" (ID: {conflict.id}). '
+                f'Terms like "{", ".join(similar_terms)}" are considered duplicates.'
+            )
+        
+        return normalized_value
+
+    def create(self, validated_data):
+        instance = Ingredient(**validated_data)
+        self._validate_model_instance(instance)
+        instance.save()
+        return instance
 
     def update(self, instance, validated_data):
-        if "name" in validated_data:
-            validated_data["name"] = self._validate_unique_name(
-                Ingredient, "name", validated_data["name"], instance.id
-            )
-        return super().update(instance, validated_data)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
 
     class Meta:
         model = Ingredient
@@ -53,41 +93,44 @@ class CookingStepSerializer(serializers.ModelSerializer):
         fields = ["id", "step_number", "instruction", "image"]
         extra_kwargs = {"image": {"required": False}}
 
-
 class UnitSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
     def validate(self, data):
-        for field in ["name", "abbreviation"]:
-            if not data.get(field, "").strip():
-                raise serializers.ValidationError(
-                    {field: f"{field.capitalize()} cannot be empty"}
-                )
+        if not data.get("name", "").strip():
+            raise serializers.ValidationError({"name": "Name cannot be empty"})
+        
+        if "abbreviation" in data and not data["abbreviation"].strip():
+            data["abbreviation"] = ""  # convert empty string to empty
+        
         return data
 
-    def _validate_unit(self, data, instance=None):
-        data["name"] = self._normalize_name(data["name"], is_unit=True)
-        data["abbreviation"] = self._normalize_name(data["abbreviation"], is_unit=True)
-
-        query = Unit.objects.filter(
-            models.Q(name__iexact=data["name"])
-            | models.Q(abbreviation__iexact=data["abbreviation"])
+    def _validate_unit_data(self, data, instance=None):
+        """Validate using model logic"""
+        temp_instance = Unit(
+            name=self._normalize_name(data["name"]),
+            abbreviation=self._normalize_name(data.get("abbreviation", "")) if data.get("abbreviation") else ""
         )
-
+        
         if instance:
-            query = query.exclude(id=instance.id)
-
-        if conflict := query.first():
-            raise serializers.ValidationError(
-                {"name": f'Unit conflict with "{conflict.name}" (ID: {conflict.id})'}
-            )
-        return data
+            temp_instance.pk = instance.pk
+            
+        self._validate_model_instance(temp_instance)
+        return {
+            "name": temp_instance.name,
+            "abbreviation": temp_instance.abbreviation
+        }
 
     def create(self, validated_data):
-        validated_data = self._validate_unit(validated_data)
-        return super().create(validated_data)
+        validated_data = self._validate_unit_data(validated_data)
+        instance = Unit(**validated_data)
+        instance.save()
+        return instance
 
     def update(self, instance, validated_data):
-        validated_data = self._validate_unit(validated_data, instance)
-        return super().update(instance, validated_data)
+        validated_data = self._validate_unit_data(validated_data, instance)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
 
     class Meta:
         model = Unit
@@ -121,46 +164,58 @@ class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMix
             "unit_detail",
         ]
 
-    def validate(self, data):
-        if "ingredient_name" in data:
-            data["ingredient_name"] = self._validate_unique_name(
-                Ingredient, "name", data["ingredient_name"]
-            )
+    def _get_or_create_ingredient(self, name):
+        """Get or create ingredient with proper validation"""
+        normalized_name = self._normalize_name(name)
+        
+        # check for existing similar ingredients first
+        similar_terms = self._get_similar_terms(normalized_name)
+        query = models.Q()
+        for term in similar_terms:
+            query |= models.Q(name__iexact=term)
+        
+        existing = Ingredient.objects.filter(query).first()
+        if existing:
+            return existing
+        
+        # create new ingredient with validation
+        ingredient = Ingredient(name=name.strip())
+        self._validate_model_instance(ingredient)
+        ingredient.save()
+        return ingredient
 
-        if "unit_name" in data:
-            norm_unit = self._normalize_name(data["unit_name"], is_unit=True)
-            conflict = Unit.objects.filter(
-                models.Q(name__iexact=norm_unit)
-                | models.Q(abbreviation__iexact=norm_unit[:3])
-            ).first()
-
-            if conflict:
-                raise serializers.ValidationError(
-                    {
-                        "unit_name": f'Unit conflict with "{conflict.name}" (ID: {conflict.id})'
-                    }
-                )
-            data["unit_name"] = norm_unit
-
-        return data
-
-    def _handle_ingredient_or_unit(self, field_name, model, validated_data):
-        if f"{field_name}_name" in validated_data:
-            name = validated_data.pop(f"{field_name}_name")
-            is_ingredient = model == Ingredient
-            norm_name = self._normalize_name(
-                name, is_ingredient=is_ingredient, is_unit=not is_ingredient
-            )
-
-            obj, _ = model.objects.get_or_create(
-                name__iexact=norm_name, defaults={"name": norm_name}
-            )
-            validated_data[field_name] = obj
+    def _get_or_create_unit(self, name):
+        """Get or create unit with proper validation"""
+        normalized_name = self._normalize_name(name)
+        
+        # check for existing similar units
+        similar_terms = self._get_similar_terms(normalized_name)
+        query = models.Q()
+        for term in similar_terms:
+            query |= models.Q(name__iexact=term) | models.Q(abbreviation__iexact=term)
+        
+        existing = Unit.objects.filter(query).first()
+        if existing:
+            return existing
+        
+        # create new unit with validation
+        unit = Unit(name=name.strip())
+        self._validate_model_instance(unit)
+        unit.save()
+        return unit
 
     def create(self, validated_data):
         with transaction.atomic():
-            self._handle_ingredient_or_unit("ingredient", Ingredient, validated_data)
-            self._handle_ingredient_or_unit("unit", Unit, validated_data)
+            # handle ingredient
+            if 'ingredient_name' in validated_data:
+                ingredient_name = validated_data.pop('ingredient_name')
+                validated_data['ingredient'] = self._get_or_create_ingredient(ingredient_name)
+            
+            # handle unit
+            if 'unit_name' in validated_data:
+                unit_name = validated_data.pop('unit_name')
+                validated_data['unit'] = self._get_or_create_unit(unit_name)
+            
             return super().create(validated_data)
 
 class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
@@ -198,104 +253,51 @@ class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
 
         dish = Dish.objects.create(**validated_data)
 
+        # use DishIngredientSerializer for consistent validation
         for ingredient_data in ingredients_data:
-        # Handle ingredient
-            ingredient = None
-            if 'ingredient' in ingredient_data:
-                # Case 1: Using existing ingredient by ID
-                ingredient = ingredient_data['ingredient']
-            elif 'ingredient_name' in ingredient_data:
-                # Case 2: Creating new ingredient by name
-                norm_name = self._normalize_name(ingredient_data['ingredient_name'], is_ingredient=True)
-                ingredient, _ = Ingredient.objects.get_or_create(
-                    name__iexact=norm_name, 
-                    defaults={'name': norm_name}
-                )
-            else:
-                raise serializers.ValidationError("Either 'ingredient' or 'ingredient_name' must be provided")
-            
-            # Handle unit
-            unit = None
-            if 'unit' in ingredient_data:
-                # Case 1: Using existing unit by ID
-                unit = ingredient_data['unit']
-            elif 'unit_name' in ingredient_data:
-                # Case 2: Creating new unit by name
-                norm_unit = self._normalize_name(ingredient_data['unit_name'], is_unit=True)
-                unit, _ = Unit.objects.get_or_create(
-                    name__iexact=norm_unit,
-                    defaults={'name': norm_unit}
-                )
-            else:
-                raise serializers.ValidationError("Either 'unit' or 'unit_name' must be provided")
-
-            # Validate quantity
-            if 'quantity' not in ingredient_data:
-                raise serializers.ValidationError("Quantity is required")
-
-            # Create DishIngredient
-            DishIngredient.objects.create(
-                dish=dish,
-                ingredient=ingredient,
-                unit=unit,
-                quantity=ingredient_data['quantity']
-            )
+            ingredient_data['dish'] = dish.id
+            serializer = DishIngredientSerializer(data=ingredient_data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save(dish=dish)
 
         for step_data in steps_data:
             CookingStep.objects.create(dish=dish, **step_data)
 
         return dish
 
-class GrocerySerializer(serializers.ModelSerializer, BaseNormalizationMixin):
-    ingredient_name = serializers.CharField(source="ingredient.name", read_only=True)
-    new_ingredient = serializers.CharField(
-        write_only=True, required=False, allow_blank=True
-    )
-
+class GrocerySerializer(serializers.ModelSerializer):
     class Meta:
-        model = Grocery
+        model = GroceryItem
         fields = [
             "id",
-            "ingredient",
-            "ingredient_name",
-            "purchased",
+            "name",
+            "in_cart",
+            "is_optional",
             "created_at",
-            "new_ingredient",
         ]
+        read_only_fields = ['created_at']
 
-    def get_fields(self):
-        fields = super().get_fields()
-        if self.instance is not None:
-            fields.pop("new_ingredient", None)
-        return fields
-
-    def validate(self, data):
-        if self.instance is None:
-            new_ingredient = data.get("new_ingredient", "").strip()
-            existing_ingredient = data.get("ingredient")
-
-            if new_ingredient:
-                norm_name = self._normalize_name(new_ingredient, is_ingredient=True)
-                if Grocery.objects.filter(
-                    ingredient__name__iexact=norm_name, purchased=False
-                ).exists():
-                    raise serializers.ValidationError(
-                        "This ingredient is already in your grocery list"
-                    )
-            elif not existing_ingredient:
-                raise serializers.ValidationError(
-                    "You must provide either an existing ingredient or a new one"
-                )
-        return data
+    def validate_name(self, value):
+        """Clean and validate the grocery item name"""
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Grocery item name cannot be empty.")
+        
+        # Check for case-insensitive duplicates (same logic as your admin)
+        duplicate_exists = GroceryItem.objects.filter(
+            name__iexact=name
+        ).exclude(pk=self.instance.pk if self.instance else None).exists()
+        
+        if duplicate_exists:
+            raise serializers.ValidationError(
+                f'"{name}" already exists in your grocery list. '
+                'Please edit the existing item instead.'
+            )
+        
+        return name.title()  # Capitalize first letter of each word
 
     def create(self, validated_data):
-        new_ingredient = validated_data.pop("new_ingredient", "").strip()
-
-        if new_ingredient:
-            norm_name = self._normalize_name(new_ingredient, is_ingredient=True)
-            ingredient, _ = Ingredient.objects.get_or_create(
-                name__iexact=norm_name, defaults={"name": norm_name}
-            )
-            validated_data["ingredient"] = ingredient
-
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        return super().update(instance, validated_data)
