@@ -12,6 +12,15 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 from decouple import config
+import dj_database_url
+
+# Explicitly load DATABASE_URL from .env (ignore system env vars)
+DATABASE_URL = config('DATABASE_URL', default='')
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL not found in .env file!")
+
+ENVIRONMENT = config('ENVIRONMENT', default='development')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -55,6 +64,7 @@ REST_FRAMEWORK = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -87,13 +97,40 @@ WSGI_APPLICATION = 'cookbook.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
+
+# print("Loaded DATABASE_URL:", config('DATABASE_URL'))
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.parse(
+        config('DATABASE_URL'),  # Uses the .env value
+        conn_max_age=600,
+        ssl_require=True
+    )
 }
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'railway',
+#         'USER': 'postgres',
+#         'PASSWORD': 'ZamWPUQLnstUhMwPlChIgZeWzoiLYkIn',
+#         'HOST': 'maglev.proxy.rlwy.net',
+#         'PORT': '53667',
+#         'OPTIONS': {'sslmode': 'require'},
+#     }
+# }
+
+# if ENVIRONMENT == 'production':
+#     DATABASES['default'] = dj_database_url.config(default=config('DATABASE_URL'))
+DATABASES['default']['OPTIONS'] = {'sslmode': 'require'}
+
+# print("Database config:", DATABASES['default'])
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -130,6 +167,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # ← Add this line
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
