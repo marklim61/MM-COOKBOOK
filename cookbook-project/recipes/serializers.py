@@ -21,8 +21,6 @@ class BaseNormalizationMixin:
             ['pounds', 'pound', 'lbs', 'lb'],
             ['ounces', 'ounce', 'oz'],
             ['cups', 'cup', 'c'],
-            ['minutes', 'minute', 'mins', 'min'],
-            ['hours', 'hour', 'hrs', 'hr'],
             ['grams', 'gram', 'g'],
             ['kilograms', 'kilogram', 'kg'],
         ]
@@ -52,12 +50,12 @@ class IngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
         # check for similar terms conflicts manually since we can't rely on model validation here
         similar_terms = self._get_similar_terms(normalized_value)
         
-        # Build query to check for conflicts with similar terms
+        # build query to check for conflicts with similar terms
         query = models.Q()
         for term in similar_terms:
             query |= models.Q(name__iexact=term)
         
-        # Exclude current instance if updating
+        # exclude current instance if updating
         existing_ingredients = Ingredient.objects.filter(query)
         if self.instance:
             existing_ingredients = existing_ingredients.exclude(pk=self.instance.pk)
@@ -137,12 +135,11 @@ class UnitSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
         fields = ["id", "name", "abbreviation"]
 
 class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
-    # Remove source='ingredient' to avoid conflict with to_internal_value method
     ingredient_id = serializers.PrimaryKeyRelatedField(
         queryset=Ingredient.objects.all(), 
         required=False, 
         write_only=True,
-        source='ingredient'  # Add this back to properly map to the model field
+        source='ingredient'
     )
     ingredient_name = serializers.CharField(
         write_only=True, required=False, allow_blank=True
@@ -153,7 +150,7 @@ class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMix
         queryset=Unit.objects.all(), 
         required=False, 
         write_only=True,
-        source='unit'  # Add this back to properly map to the model field
+        source='unit'
     )
     unit_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
     unit_detail = UnitSerializer(source="unit", read_only=True)
@@ -174,18 +171,18 @@ class DishIngredientSerializer(serializers.ModelSerializer, BaseNormalizationMix
     def to_internal_value(self, data):
         """Handle both 'ingredient' and 'ingredient_id' field names for backward compatibility"""
         if isinstance(data, dict):
-            data = data.copy()  # Don't modify original
+            data = data.copy()
             
-            # Handle ingredient
+            # handle ingredient
             if 'ingredient_id' in data:
                 if isinstance(data['ingredient_id'], dict):
-                    # If it's an object, extract the ID
+                    # if it's an object, extract the ID
                     data['ingredient_id'] = data['ingredient_id'].get('id', data['ingredient_id'])
             
-            # Handle unit
+            # handle unit
             if 'unit_id' in data:
                 if isinstance(data['unit_id'], dict):
-                    # If it's an object, extract the ID
+                    # if it's an object, extract the ID
                     data['unit_id'] = data['unit_id'].get('id', data['unit_id'])
         
         return super().to_internal_value(data)
@@ -291,9 +288,23 @@ class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
 
         dish = Dish.objects.create(**validated_data)
 
+        ingredient_serializer = DishIngredientSerializer()
+
         # Create dish ingredients
         for ingredient_data in ingredients_data:
-            DishIngredient.objects.create(dish=dish, **ingredient_data)
+            data = ingredient_data.copy()
+        
+            # Handle ingredient
+            if 'ingredient_name' in data:
+                ingredient = ingredient_serializer._get_or_create_ingredient(data.pop('ingredient_name'))
+                data['ingredient'] = ingredient
+            
+            # Handle unit
+            if 'unit_name' in data:
+                unit = ingredient_serializer._get_or_create_unit(data.pop('unit_name'))
+                data['unit'] = unit
+            
+            DishIngredient.objects.create(dish=dish, **data)
 
         for step_data in steps_data:
             CookingStep.objects.create(dish=dish, **step_data)
@@ -315,9 +326,24 @@ class DishSerializer(serializers.ModelSerializer, BaseNormalizationMixin):
                 # Clear existing ingredients
                 instance.dishingredient_set.all().delete()
                 
-                # Create new ingredients
+                # Initialize the ingredient serializer to reuse its methods
+                ingredient_serializer = DishIngredientSerializer()
+                
+                # Create new ingredients (handling both ID and name cases)
                 for ingredient_data in ingredients_data:
-                    DishIngredient.objects.create(dish=instance, **ingredient_data)
+                    data = ingredient_data.copy()
+                    
+                    # Handle ingredient
+                    if 'ingredient_name' in data:
+                        ingredient = ingredient_serializer._get_or_create_ingredient(data.pop('ingredient_name'))
+                        data['ingredient'] = ingredient
+                    
+                    # Handle unit
+                    if 'unit_name' in data:
+                        unit = ingredient_serializer._get_or_create_unit(data.pop('unit_name'))
+                        data['unit'] = unit
+                    
+                    DishIngredient.objects.create(dish=instance, **data)
         
         # Handle steps if provided
         if steps_data is not None:
