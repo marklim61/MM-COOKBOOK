@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 from decouple import config
+
+# this is to parse the DATABASE_URL from .env
 import dj_database_url
 
 # Explicitly load DATABASE_URL from .env (ignore system env vars)
@@ -24,7 +26,6 @@ ENVIRONMENT = config('ENVIRONMENT', default='development')
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -97,6 +98,7 @@ WSGI_APPLICATION = 'cookbook.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+#Django's default SQLite database configuration
 # DATABASES = {
 #     'default': {
 #         'ENGINE': 'django.db.backends.sqlite3',
@@ -114,20 +116,7 @@ DATABASES = {
     )
 }
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'railway',
-#         'USER': 'postgres',
-#         'PASSWORD': 'ZamWPUQLnstUhMwPlChIgZeWzoiLYkIn',
-#         'HOST': 'maglev.proxy.rlwy.net',
-#         'PORT': '53667',
-#         'OPTIONS': {'sslmode': 'require'},
-#     }
-# }
-
-# if ENVIRONMENT == 'production':
-#     DATABASES['default'] = dj_database_url.config(default=config('DATABASE_URL'))
+# sslmode=require for secure connections
 DATABASES['default']['OPTIONS'] = {'sslmode': 'require'}
 
 # print("Database config:", DATABASES['default'])
